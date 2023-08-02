@@ -19,8 +19,10 @@ def uniform(bounds):
     return [random.uniform(b[0], b[1]) for b in bounds]
 
 
-def NSGAII(NObj, objective, pbounds, seed=None, NGEN=50, MU=100, CXPB=0.9):
-    random.seed(seed)
+def NSGAII(NObj, objective, pbounds, my_seed, NGEN=50, MU=100, CXPB=0.9):
+    
+    np.random.seed(my_seed)
+    
 
     global FirstCall
     if FirstCall:
@@ -63,9 +65,11 @@ def NSGAII(NObj, objective, pbounds, seed=None, NGEN=50, MU=100, CXPB=0.9):
     stats.register("max", np.max, axis=0)
 
     logbook = tools.Logbook()
+   
     logbook.header = "gen", "evals", "std", "min", "avg", "max"
 
     pop = toolbox.population(n=MU)
+    
 
     # Evaluate the individuals with an invalid fitness
     invalid_ind = [ind for ind in pop if not ind.fitness.valid]
@@ -87,6 +91,7 @@ def NSGAII(NObj, objective, pbounds, seed=None, NGEN=50, MU=100, CXPB=0.9):
         offspring = [toolbox.clone(ind) for ind in offspring]
 
         for ind1, ind2 in zip(offspring[::2], offspring[1::2]):
+        
             if random.random() <= CXPB:
                 toolbox.mate(ind1, ind2)
 
@@ -104,8 +109,9 @@ def NSGAII(NObj, objective, pbounds, seed=None, NGEN=50, MU=100, CXPB=0.9):
         pop = toolbox.select(pop + offspring, MU)
         record = stats.compile(pop)
         logbook.record(gen=gen, evals=len(invalid_ind), **record)
-        # print(logbook.stream)
+        
 
     front = np.array([ind.fitness.values for ind in pop])
+    random.seed(my_seed)
 
     return pop, logbook, front
