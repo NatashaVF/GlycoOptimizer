@@ -28,9 +28,6 @@ from ..utils import is_listlike
 from ..utils import is_2Dlistlike
 from ..utils import normalize_dimensions
 
-from ..learning.gaussian_process.gpr import _param_for_white_kernel_in_Sum
-from ..learning.gaussian_process.kernels import WhiteKernel
-
 
 class Optimizer(object):
     """Run bayesian optimisation loop.
@@ -41,14 +38,6 @@ class Optimizer(object):
 
     Use this class directly if you want to control the iterations of your
     bayesian optimisation loop.
-    
-    In default behavior, the optimizer will reset the modelled experimental
-    noise between each refitting (read: while adding new data). This is
-    described in Rasmussen and Williams chapter 2. 
-    Some users might want to plot, predict or sample from a model that includes
-    the modelling of the experimental noise: in that case, two helper methods
-    can "switch" the noise "on/off". Functions are called 'add_modelled_noise'
-    and 'remove_modelled_noise'.
 
     Parameters
     ----------
@@ -99,9 +88,9 @@ class Optimizer(object):
                 - Each acquisition function is optimised independently to
                   propose an candidate point `X_i`.
                 - Out of all these candidate points, the next point `X_best` is
-                  chosen by $softmax(\\eta g_i)$
+                  chosen by $softmax(\eta g_i)$
                 - After fitting the surrogate model with `(X_best, y_best)`,
-                  the gains are updated such that $g_i -= \\mu(X_i)$
+                  the gains are updated such that $g_i -= \mu(X_i)$
         - `"EIps" for negated expected improvement per second to take into
           account the function compute time. Then, the objective function is
           assumed to return two values, the first being the objective value and
@@ -701,10 +690,12 @@ class Optimizer(object):
             and self.base_estimator_ is not None
         ):
             transformed_bounds = np.array(self.space.transformed_bounds)
+            
             est = clone(self.base_estimator_)
 
             # If the problem containts multiblie objectives a model has to be fitted for each objective
             if self.n_objectives > 1:
+                
 
                 # fit an estimator to each objective
                 obj_models = []
@@ -721,28 +712,57 @@ class Optimizer(object):
 
                 # Setting the probability of using Steinerberger for the next point (exploration)
                 # The probability for using the NSGAII algorithm is 1-prob_stbr (exploitation)
-                prob_stbr = 0.25
+                #prob_stbr = 0.25 ##Used for first campaign###
+                prob_stbr = 0.0   ##Used for second campaign###
 
                 # Simulate a random number
+                ##Make sure probability is random, and the same number is not picked everytime the Optimizer is initiated or pickled optimizer is fetched###
+                np.random.seed()
                 random_uniform_number = np.random.uniform()
+
+
+                ###Improved reproducibility###
+                np.random.seed(1660)
+                
 
                 # The random number decides what strategy to use for the next point
                 if random_uniform_number < prob_stbr:
 
                     # self._next_x is found via stbr_scipy
+                    print('next point found using Steinenberger sampling')
                     next_x = self.stbr_scipy()
                     self._next_x = next_x[0]
 
                 else:
 
-                    # The Pareto front is approximated using the NSGAII algorithm
-                    pop, logbook, front = self.NSGAII()
+                    print('next point found using Pareto front')
+                    # Seed for reproducibility
+                    my_seed = 1660 
+                    while True:
+                        # The Pareto front is approximated using the NSGAII algorithm
 
-                    # The best point in the Pareto front is found (the point furthest from existing measurements)
-                    next_x = self.best_Pareto_point(pop, front)
-                    self._next_x = self.space.inverse_transform(
-                        next_x.reshape((1, -1))
-                    )[0]
+                        pop, logbook, front = self.NSGAII(my_seed)
+                        
+
+                        # The best point in the Pareto front is found (the point furthest from existing measurements)
+                        next_x = self.best_Pareto_point(pop, front)
+                        self._next_x = self.space.inverse_transform(
+                            next_x.reshape((1, -1))
+                        )[0]
+                        
+                        # Calculate if constrain is satisfied 
+                        cons_sum = self._next_x[6] + self._next_x[7]
+                        
+                        #Update seed to get a new but reproducible next_x
+                        my_seed = my_seed + 1
+
+                        #Is constrain is satisfied stop the loop
+                        if cons_sum <= 1.0:
+                            break
+
+                    #Reset seed to get same results when not plotting before ask
+                    my_seed = 1660 
+
 
             if self.n_objectives == 1:
                 with warnings.catch_warnings():
@@ -848,6 +868,7 @@ class Optimizer(object):
                     next_x.reshape((1, -1))
                 )[0]
         # Pack results
+
 
         return create_result(
             self.Xi, self.yi, self.space, self.rng, models=self.models
@@ -998,6 +1019,7 @@ class Optimizer(object):
 
     def stbr_scipy(self, n_points=1):
         from scipy.optimize import minimize
+        #print('steinerberger sampling used for point suggestion')
 
         # Suggestion for improvemenet. Seperate categorical and real/integer space.
         # Only solve Steinerberger minimization in real/integer sub space.
@@ -1008,6 +1030,7 @@ class Optimizer(object):
         for i in range(self.space.transformed_n_dims):
             bounds.append((0.0, 1.0))
         bounds = tuple(tuple(sub) for sub in bounds)
+
 
         # Copy of the optimizer to not append new points to original  self.Xi
         # Set base estimator to GP so transform always nomalizes
@@ -1032,20 +1055,36 @@ class Optimizer(object):
             loc_min = []
             fun_val = []
             # We use 20 lhs point as initial guesses for minimization
-            x0 = copy.space.lhs(20)
-            x0 = copy.space.transform(x0)
+            if self._constraints:
+                # If the constraint is of the SumEquals type, create samples that respect this
+                x0 = self.space.transform(
+                        self._constraints.rvs(
+                            n_samples=20, random_state=self.rng
+                        )
+                    )
 
             # Loop over each initial guess and find a local minimum
+        
             for j in range(len(x0)):
+                bounds = list(bounds)
+
+                ###change of bounds to satisfy Sum constrain#####
+                bounds[6] = (x0[i][6],x0[i][6])
+                bounds[7] = (x0[i][7],x0[i][7])
+            
+
                 res = minimize(copy.stbr_fun, x0=x0[j], bounds=bounds)
                 loc_min.append(res.x)
+
                 fun_val.append(res.fun)
+
 
             # Decide the global minimum as the local minimum with the lowest function value
             glob_min = loc_min[np.argmin(fun_val)]
             next_X = np.asarray(glob_min).reshape(
                 1, copy.space.transformed_n_dims
             )
+            
             # Transform back to original space
             next_X = copy.space.inverse_transform(next_X)
 
@@ -1101,14 +1140,14 @@ class Optimizer(object):
         F = [None] * self.n_objectives
         xx = np.asarray(x).reshape(1, -1)
 
-        # Constraints = 0.0
-        # for cons in self.constraints:
-        #    y = cons['fun'](x)
-        #    if cons['type'] == 'eq':
-        #        Constraints += np.abs(y)
-        #    elif cons['type'] == 'ineq':
-        #        if y < 0:
-        #            Constraints -= y
+        #Constraints = 0.0
+        #for cons in self.constraints:
+            #y = cons['fun'](x)
+            #if cons['type'] == 'eq':
+                #Constraints += np.abs(y)
+            #elif cons['type'] == 'ineq':
+                #if y < 0:
+                    #Constraints -= y
 
         for i in range(self.n_objectives):
 
@@ -1118,10 +1157,16 @@ class Optimizer(object):
 
     # This function returns the point in the Pareto front, which is deemed the best (furthest away from existing observations)
     def best_Pareto_point(self, pop, front, q=0.5):
+        #print('pareto used for point suggestion')
 
         Population = np.asarray(pop)
 
         IndexF, FatorF = self.__LargestOfLeast(front, self.yi)
+
+                        # If the constraint is of the SumEquals type, create samples that respect this
+        #x0 = self.space.transform(
+                #self._constraints.rvs(
+                #n_samples=20, random_state=self.rng))
 
         IndexPop, FatorPop = self.__LargestOfLeast(
             Population, self.space.transform(self.Xi).tolist()
@@ -1168,45 +1213,15 @@ class Optimizer(object):
         return DistMin
 
     # This function calls NSGAII to estimate the Pareto Front
-    def NSGAII(self, MU=40):
+    def NSGAII(self, my_seed, MU=40):
 
         from ._NSGA2 import NSGAII
 
         pop, logbook, front = NSGAII(
             self.n_objectives,
             self.__ObjectiveGP,
-            np.array(self.space.transformed_bounds),
-            MU=MU,
+            np.array(self.space.transformed_bounds), my_seed,
+            MU=MU
         )
 
         return pop, logbook, front
-    
-    # This function adds the modelled white noise to the regressor to allow predictions including noise
-    def add_modelled_noise(self):
-        '''
-        This method will add the noise that has been modelled to fit the data. (The noise is disabled
-        by default to reflect description in book on gaussian processes for Machine Learning
-        This has been described in Eq 2.24 of
-        http://www.gaussianprocess.org/gpml/chapters/RW2.pdf)
-        '''
-        if isinstance(self.models[-1].noise, str) and self.models[-1].noise != "gaussian":
-            raise ValueError("expected noise to be 'gaussian', got %s"
-                             % self.models[-1].noise)
-        noise_estimate = self.models[-1].noise_
-        white_present, white_param = _param_for_white_kernel_in_Sum(self.models[-1].kernel_)
-        if white_present:
-            self.models[-1].kernel_.set_params(**{white_param: WhiteKernel(noise_level=noise_estimate)})
-    
-    def remove_modelled_noise(self):
-        '''
-        This method resets the noise levels to only include the "true" uncertaincy of the main kernel
-        used for fitting and predicting. This method can be used in conjunction with the 
-        'add_modelled_noise()'
-        '''
-        if isinstance(self.models[-1].noise, str) and self.models[-1].noise != "gaussian":
-            raise ValueError("expected noise to be 'gaussian', got %s"
-                             % self.models[-1].noise)
-        white_present, white_param = _param_for_white_kernel_in_Sum(self.models[-1].kernel_)
-        if white_present:
-            self.models[-1].kernel_.set_params(**{white_param: WhiteKernel(noise_level=0.0)})
-    
